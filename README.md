@@ -1,9 +1,11 @@
 # CYD Web Radio (ESP32-2432S028R + PlatformIO)
 
+![](images/CYD_WebRadioS.jpeg)
+
 ## 使い方
 1. VS Code で `cyd-webradio` フォルダを開く (PlatformIO IDE 拡張が必要)
 2. `include/config.h` の `WIFI_SSID` / `WIFI_PASSWORD` を編集
-3. スピーカーを CYD の `SPEAK` 端子 (P4, 1.25mm 2pin) に接続
+3. スピーカーを CYD の `SPEAK` 端子 (P4, 1.25mm 2pin) に接続 *（画像はステレオ表示ですが、モノラルです）*
 4. USB接続 → PlatformIO の Upload (→) → Monitor
 
 ## 操作 (タッチ)
