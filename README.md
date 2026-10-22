@@ -12,7 +12,7 @@
 `|<` 前の局 / 再生・停止 / `>|` 次の局 / `-` `+` 音量
 最後に聴いた局と音量は保存されます。
 
-## 配信している曲の設定
+## ラジオ局の設定
 [Radio BrowserでJapanを検索](https://www.radio-browser.info/search?page=1&order=clickcount&reverse=true&hidebroken=true&countrycode=JP})
 などで曲の名前とURLを試してみて、`include/config.h` の `const Station STATIONS[] ` の配列を書き換えます。
 
