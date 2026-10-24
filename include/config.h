@@ -44,12 +44,28 @@
 // 0: 内蔵DAC (CYD のスピーカー端子 / GPIO26)
 // 1: 外付けI2S DAC/アンプ (MAX98357A など) ※ ノイズが気になる場合はこちらが根本的な対策
 #define AUDIO_OUT_I2S 0
-// AUDIO_OUT_I2S=1 のときのピン (CYD の基板上で実際に引き出せるピンに合わせて変更すること)
-//   使える出力ピンの例: 22, 27 (拡張コネクタ)。3本目は RGB LED 用の 4 / 16 / 17 などから
-//   ※ 21(バックライト)、25/32/33/36/39(タッチ)、12/13/14/15/2(液晶) は使えない
+// AUDIO_OUT_I2S=1 のときのピン (MAX98357A の BCLK / LRC / DIN につなぐ)
+//
+// 基板の拡張端子 (実機で確認済み):
+//   CN1 : GND, IO22, IO27, 3V3
+//   P3  : GND, IO35, IO22, IO21
+// このうち I2S の出力に使えるのは IO22 と IO27 の2本だけ。
+//   IO35 : 入力専用のピンなので、出力には使えない
+//   IO21 : バックライトと共用なので使えない
+// I2S は3本 (BCLK / LRC / DIN) 必要なので、3本目 (DIN) を次のどれかから選ぶ:
+//   (A) IO1 : P1 (シリアル) コネクタの TX。半田付け不要。ただし UART0 と共用なのでシリアルログが使えなくなる
+//   (B) IO16 / IO17 / IO4 : 基板の RGB LED の端子から配線 (半田付けが必要)。シリアルログも使える
+// ※ 15(液晶CS)、25/32/33/36/39(タッチ)、2/12/13/14(液晶) は使えない
 #define I2S_BCLK 27
 #define I2S_LRC  22
-#define I2S_DOUT 16
+#define I2S_DOUT 1
+
+// シリアルログ (1:出す 0:出さない)。I2S のピンに IO1 / IO3 を使う場合は自動で 0 になる
+#define SERIAL_LOG 1
+#if AUDIO_OUT_I2S && (I2S_BCLK == 1 || I2S_BCLK == 3 || I2S_LRC == 1 || I2S_LRC == 3 || I2S_DOUT == 1 || I2S_DOUT == 3)
+  #undef  SERIAL_LOG
+  #define SERIAL_LOG 0
+#endif
 
 // CYDのスピーカー端子(アンプ入力)は GPIO26 = ESP32内蔵DAC2 に接続されている
 // (GPIO25 はタッチのCLKと競合するため LEFT のみ使用)
@@ -63,8 +79,13 @@
 // 音量1 → VOLUME_MIN_DB、音量21 → VOLUME_MAX_DB。
 // -30 付近まで絞ると、音楽の振幅が DAC (8bit) の数段分しかなくなり、音楽が聞こえなくなる。
 // 歪む場合は MAX を下げ (-16 など)、小さすぎる場合は上げる (-6 など)
-#define VOLUME_MAX_DB  -12
-#define VOLUME_MIN_DB  -46
+#if AUDIO_OUT_I2S
+  #define VOLUME_MAX_DB  -6     // 外付けI2S(16bit): 内蔵DACのような制約がないので、広く使える
+  #define VOLUME_MIN_DB  -50
+#else
+  #define VOLUME_MAX_DB  -12
+  #define VOLUME_MIN_DB  -46
+#endif
 
 // 内蔵DAC(8bit)への丸め方:
 //   0 = 単純な丸め
@@ -73,8 +94,8 @@
 //   3 = ノイズシェーピングのみ (無音では雑音が出ない。量子化のざらつきを高い周波数へ逃がす)
 #define AUDIO_DITHER_MODE 3
 
-// VUメーター: 1=表示 0=無効 (音切れが多いときは 0 を試す)
-#define ENABLE_VU 1
+// スペクトラム表示: 1=表示 0=無効 (音切れが多いときは 0 を試す)
+#define ENABLE_SPECTRUM 1
 
 // 画面の上下が逆に見える場合は 1 にする (180度回転)
 #define SCREEN_FLIP 0
