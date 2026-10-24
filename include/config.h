@@ -5,6 +5,14 @@
 #define WIFI_SSID     "your_ssid"
 #define WIFI_PASSWORD "your_password"
 
+// WiFi の送信出力 (電流のピークが小さくなり、スピーカーのノイズが減ることがある)
+// 弱い順: WIFI_POWER_2dBm, 5dBm, 7dBm, 8_5dBm, 11dBm, 13dBm, 15dBm, 17dBm, 18_5dBm, 19dBm, 19_5dBm(既定)
+// 家の中なら 8_5dBm でも十分。つながりにくければ 11dBm / 15dBm に上げる
+#define WIFI_TX_POWER WIFI_POWER_8_5dBm
+
+// WiFi のモデムスリープ: 0=常時受信(既定) 1=省電力 (ノイズの出方が変わることがある)
+#define WIFI_MODEM_SLEEP 0
+
 // ===== タッチ (XPT2046) : CYD は別SPI(VSPI)に接続 =====
 #define TOUCH_CLK  25
 #define TOUCH_MOSI 32
@@ -12,11 +20,61 @@
 #define TOUCH_CS   33
 #define TOUCH_IRQ  36
 
+// ===== 受信バッファ =====
+// ライブラリの既定は約8KB (128kbps で 0.4秒分) しかなく、WiFi の揺らぎだけで音が途切れる。
+// 大きいほど途切れに強いが、その分メモリを使う (https の局は TLS で約50KB 使う)。
+// 目安: 40000 → 約2.5秒分 (128kbps)。起動ログの free heap に余裕がなければ小さくする
+#define AUDIO_BUFFER_BYTES 40000
+
+// 再生を始める前に溜めておく量 (バイト)。patch_audio.py でライブラリに追加した機能。
+// ライブ配信は実時間と同じ速さでしか届かないため、溜めずに再生を始めると、
+// 通信が少し遅れただけで音が途切れる。128kbps なら 16000 バイト = 約1秒分。
+// 大きいほど途切れに強いが、局を選んでから音が出るまでの時間が延びる。
+// AUDIO_BUFFER_BYTES より小さい値にすること (自動で上限をかける)
+#define AUDIO_PREBUFFER_BYTES 24000
+
+// ===== CPUクロック =====
+// 240 (既定) / 160 / 80 (MHz)。
+// 下げるとスピーカーの「ピー」音は小さくなるが、MP3のデコードが間に合わなくなると、
+// I2S が無音(DACでは 0V)を出力し、音量に関係なく大きな「ブツブツ」音が鳴る。
+// 「ブツブツ」が出る場合は 240 に戻すこと
+#define CPU_FREQ_MHZ 240
+
 // ===== 音声出力 =====
+// 0: 内蔵DAC (CYD のスピーカー端子 / GPIO26)
+// 1: 外付けI2S DAC/アンプ (MAX98357A など) ※ ノイズが気になる場合はこちらが根本的な対策
+#define AUDIO_OUT_I2S 0
+// AUDIO_OUT_I2S=1 のときのピン (CYD の基板上で実際に引き出せるピンに合わせて変更すること)
+//   使える出力ピンの例: 22, 27 (拡張コネクタ)。3本目は RGB LED 用の 4 / 16 / 17 などから
+//   ※ 21(バックライト)、25/32/33/36/39(タッチ)、12/13/14/15/2(液晶) は使えない
+#define I2S_BCLK 27
+#define I2S_LRC  22
+#define I2S_DOUT 16
+
 // CYDのスピーカー端子(アンプ入力)は GPIO26 = ESP32内蔵DAC2 に接続されている
 // (GPIO25 はタッチのCLKと競合するため LEFT のみ使用)
 
-#define DEFAULT_VOLUME 10   // 0..21
+#define DEFAULT_VOLUME 6    // 0..21
+
+// ---- 音量カーブ ----
+// 音量1 → VOLUME_MIN_DB、音量21 → VOLUME_MAX_DB まで、dB で等間隔に変化する (0 は消音)
+// 最低音量でもまだ大きい: VOLUME_MIN_DB をもっと小さく (例 -55)
+// 最大音量が小さい    : VOLUME_MAX_DB を 0 に近づける
+// 音量1 → VOLUME_MIN_DB、音量21 → VOLUME_MAX_DB。
+// -30 付近まで絞ると、音楽の振幅が DAC (8bit) の数段分しかなくなり、音楽が聞こえなくなる。
+// 歪む場合は MAX を下げ (-16 など)、小さすぎる場合は上げる (-6 など)
+#define VOLUME_MAX_DB  -12
+#define VOLUME_MIN_DB  -46
+
+// 内蔵DAC(8bit)への丸め方:
+//   0 = 単純な丸め
+//   1 = ディザのみ         (無音でも雑音が出るので非推奨)
+//   2 = ディザ + ノイズシェーピング (無音でも雑音が出るので非推奨)
+//   3 = ノイズシェーピングのみ (無音では雑音が出ない。量子化のざらつきを高い周波数へ逃がす)
+#define AUDIO_DITHER_MODE 3
+
+// VUメーター: 1=表示 0=無効 (音切れが多いときは 0 を試す)
+#define ENABLE_VU 1
 
 // 画面の上下が逆に見える場合は 1 にする (180度回転)
 #define SCREEN_FLIP 0
