@@ -7,6 +7,10 @@
 #include "Audio.h"
 #include "config.h"
 
+// patch_audio.py がライブラリ側 (Audio.cpp) に追加する変数。
+// weak 定義にしてあるので、パッチが未適用でもビルドは通る (その場合プリバッファは効かない)
+__attribute__((weak)) volatile uint32_t g_audioPrebuffer = 0;
+
 // ---------------- デバイス ----------------
 LGFX tft;
 
@@ -15,12 +19,17 @@ LGFX tft;
 #define F24 (&fonts::lgfxJapanGothicP_24)
 SPIClass touchSPI(VSPI);
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
-Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);   // 内蔵DAC → GPIO26
+#if AUDIO_OUT_I2S
+Audio audio(false);                            // 外付けI2S DAC/アンプ
+#else
+Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);    // 内蔵DAC → GPIO26
+#endif
 Preferences prefs;
+bool prefsDirty = false;       // 局/音量の保存待ち (フラッシュ書き込みは音が途切れるので操作が落ち着いてから)
+uint32_t prefsDirtyAt = 0;
 
 // ---------------- 状態 (UIタスク ⇔ 音声タスク) ----------------
 volatile int  reqStation = -1;     // >=0 : その局に接続
-volatile int  reqVolume  = -1;     // >=0 : 音量変更
 volatile bool reqStop    = false;
 
 int  curStation = 0;
@@ -31,6 +40,7 @@ char streamTitle[96] = "";
 volatile bool titleDirty = true;
 volatile uint32_t lastStartMs = 0;
 volatile bool reconnectReq = false;   // 接続エラー/切断時に、局の元URLから接続し直す要求
+volatile int32_t gainQ15 = 0;               // 音量ゲイン (32768 = 等倍)
 volatile uint16_t peakL = 0, peakR = 0;   // audio_process_i2s() が更新 / UI側が読んでクリア
 
 // ---------------- 画面レイアウト ----------------
@@ -173,8 +183,8 @@ void vuUpdate() {
 
   uint16_t pl = peakL, pr = peakR;          // 直近33msのピーク振幅 (0..32768)
   peakL = 0; peakR = 0;
-  uint8_t raw[2] = { playing ? (uint8_t)(pl >> 7) : (uint8_t)0,
-                     playing ? (uint8_t)(pr >> 7) : (uint8_t)0 };
+  uint8_t raw[2] = { playing ? (uint8_t)min<uint16_t>(pl >> 7, 255) : (uint8_t)0,
+                     playing ? (uint8_t)min<uint16_t>(pr >> 7, 255) : (uint8_t)0 };
   float m = max(raw[0], raw[1]);
   vuRef = max(max(vuRef * 0.998f, m), 24.0f);   // 大きい音に合わせ、ゆっくり戻す
 
@@ -199,7 +209,10 @@ void vuUpdate() {
 
 void drawAll() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader(); drawStation(); drawTitle(); drawVolume(); vuReset();
+  drawHeader(); drawStation(); drawTitle(); drawVolume();
+#if ENABLE_VU
+  vuReset();
+#endif
   for (int i = 0; i < B_COUNT; i++) drawButton(i);
 }
 
@@ -209,7 +222,7 @@ void startStation(int idx) {
   streamTitle[0] = 0;
   playing = true;
   reqStation = curStation;
-  prefs.putInt("station", curStation);
+  prefsDirty = true; prefsDirtyAt = millis();
   drawHeader(); drawStation(); drawTitle(); drawButton(B_PLAY);
 }
 
@@ -220,10 +233,17 @@ void stopPlayback() {
   drawHeader(); drawTitle(); drawButton(B_PLAY);
 }
 
+// 音量(0..21) → ゲイン。dB 単位で等間隔に下げるので、小さい音量側も細かく調整できる
+void applyVolume() {
+  if (volume <= 0) { gainQ15 = 0; return; }
+  float db = VOLUME_MIN_DB + (float)(VOLUME_MAX_DB - VOLUME_MIN_DB) * (volume - 1) / 20.0f;
+  gainQ15 = (int32_t)(powf(10.0f, db / 20.0f) * 32768.0f);
+}
+
 void setVol(int v) {
   volume = constrain(v, 0, 21);
-  reqVolume = volume;
-  prefs.putInt("volume", volume);
+  applyVolume();
+  prefsDirty = true; prefsDirtyAt = millis();
   drawVolume();
 }
 
@@ -233,7 +253,6 @@ void audioTask(void*) {
   uint32_t reconnectAt  = 0;      // 0 以外: この時刻に再接続する
 
   for (;;) {
-    if (reqVolume >= 0) { audio.setVolume(reqVolume); reqVolume = -1; }
     if (reqStop)        { audio.stopSong(); reqStop = false; reconnectAt = 0; reconnectReq = false; }
     if (reqStation >= 0) {
       int idx = reqStation; reqStation = -1;
@@ -276,7 +295,6 @@ void audioTask(void*) {
 // ---------------- Audioライブラリ コールバック ----------------
 void audio_info(const char* info) {
   Serial.printf("info: %s\n", info);
-  if (strstr(info, "Stream lost")) reconnectReq = true;   // ライブラリ内部の再接続より先に、こちらで接続し直す
 }
 void audio_showstreamtitle(const char* s) {
   if (strncmp(s, "HTTP/", 5) == 0) {   // サーバーのエラー応答 (例: 402) が来た
@@ -289,14 +307,57 @@ void audio_showstreamtitle(const char* s) {
 }
 // I2S出力直前に呼ばれるフック。サンプルは上位16bit=L, 下位16bit=R (音量適用後)
 // ※ *continueI2S = true にしないと音が出なくなる
-void audio_process_i2s(uint32_t* sample, bool* continueI2S) {
-  int16_t l = (int16_t)(*sample >> 16);
-  int16_t r = (int16_t)(*sample & 0xFFFF);
+void IRAM_ATTR audio_process_i2s(uint32_t* sample, bool* continueI2S) {
+  int32_t l = (int16_t)(*sample >> 16);
+  int32_t r = (int16_t)(*sample & 0xFFFF);
+
+#if ENABLE_VU
+  // VUメーター用のピーク (音量を掛ける前の値なので、音量に左右されない)
   uint16_t al = (l < 0) ? -l : l;
   uint16_t ar = (r < 0) ? -r : r;
   if (al > peakL) peakL = al;
   if (ar > peakR) peakR = ar;
-  *continueI2S = true;
+#endif
+
+  // モノラル化 (スピーカー出力は GPIO26 の1本だけなので、L/R を混ぜる) + 音量
+  int32_t m = (l + r) >> 1;
+  m = (m * gainQ15) >> 15;
+
+  // 内蔵DACは8bit。16bit → 8bit への丸め
+#if AUDIO_OUT_I2S
+  int32_t q = m;                                           // 外付けI2S(16bit)は丸め不要
+#elif AUDIO_DITHER_MODE == 0
+  int32_t q = (m + 128) >> 8 << 8;                         // 単純な丸め
+#else
+  int32_t d = 0;                                             // ディザ (モード3では使わない)
+  #if AUDIO_DITHER_MODE != 3
+  static uint32_t rng = 2463534242u;
+  rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;       // xorshift32
+  d = (int32_t)(rng & 0xFF) - 128;                           // ±半LSB (8bit換算)
+  #endif
+  #if AUDIO_DITHER_MODE >= 2
+  static int32_t err = 0;
+  int32_t w = m + err;                                       // 誤差を持ち越す (ノイズシェーピング)
+  #else
+  int32_t w = m;
+  #endif
+  int32_t q = ((w + d + 128) >> 8) << 8;
+  #if AUDIO_DITHER_MODE >= 2
+  err = w - q;
+  if (err > 512)  err = 512;
+  if (err < -512) err = -512;
+  #endif
+#endif
+#if AUDIO_OUT_I2S
+  if (q > 32767)  q = 32767;
+#else
+  if (q > 32512)  q = 32512;
+#endif
+  if (q < -32768) q = -32768;
+
+  uint16_t u = (uint16_t)(int16_t)q;
+  *sample = ((uint32_t)u << 16) | u;
+  *continueI2S = true;       // true にしないと音が出ない
 }
 void audio_eof_stream(const char* s)      { Serial.printf("eof: %s\n", s); lastStartMs = 0; }
 
@@ -331,7 +392,8 @@ void handleTouch() {
 void connectWiFi() {
   drawStatusMsg("Connecting WiFi...");
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  WiFi.setSleep(WIFI_MODEM_SLEEP);
+  WiFi.setTxPower(WIFI_TX_POWER);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -342,15 +404,19 @@ void connectWiFi() {
     }
     delay(250);
   }
-  Serial.printf("WiFi OK: %s\n", WiFi.localIP().toString().c_str());
+  WiFi.setTxPower(WIFI_TX_POWER);
+  Serial.printf("WiFi OK: %s (RSSI %d dBm)\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 void setup() {
+  setCpuFrequencyMhz(CPU_FREQ_MHZ);
   Serial.begin(115200);
+  Serial.printf("CPU %d MHz\n", getCpuFrequencyMhz());
 
+  pinMode(21, OUTPUT);         // バックライトは PWM を使わず常時ON (PWMのノイズ混入を避ける)
+  digitalWrite(21, HIGH);
   tft.init();
   tft.setRotation((CYD_LANDSCAPE + (SCREEN_FLIP ? 2 : 0)) & 3);   // 横向き 320x240
-  tft.setBrightness(255);
   tft.fillScreen(TFT_BLACK);
 
   touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
@@ -362,7 +428,13 @@ void setup() {
   volume     = constrain(prefs.getInt("volume", DEFAULT_VOLUME), 0, 21);
 
   connectWiFi();
-  audio.setVolume(volume);
+#if AUDIO_OUT_I2S
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+#endif
+  audio.setBufsize(AUDIO_BUFFER_BYTES, 0);   // 最初の接続より前に呼ぶ必要がある
+  g_audioPrebuffer = min<uint32_t>(AUDIO_PREBUFFER_BYTES, AUDIO_BUFFER_BYTES - 4000);
+  audio.setVolume(21);     // ライブラリ側は最大(等倍)に固定。音量は audio_process_i2s() で調整
+  applyVolume();
 
   drawAll();
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, nullptr, 3, nullptr, 0);
@@ -371,7 +443,22 @@ void setup() {
 
 void loop() {
   handleTouch();
+  // 2秒ごとに受信バッファの状況を表示 (途切れの原因調査用)
+  static uint32_t lastDbg = 0;
+  if (millis() - lastDbg > 2000) {
+    lastDbg = millis();
+    uint32_t filled = audio.inBufferFilled(), freeB = audio.inBufferFree();
+    Serial.printf("buf %u/%u bytes  RSSI %d dBm  heap %u\n",
+                  filled, filled + freeB, WiFi.RSSI(), ESP.getFreeHeap());
+  }
+  if (prefsDirty && millis() - prefsDirtyAt > 3000) {      // 最後の操作から3秒後に保存
+    prefsDirty = false;
+    prefs.putInt("station", curStation);
+    prefs.putInt("volume", volume);
+  }
   if (titleDirty) { titleDirty = false; drawTitle(); }
+#if ENABLE_VU
   vuUpdate();
+#endif
   delay(5);
 }
