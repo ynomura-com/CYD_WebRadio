@@ -6,6 +6,13 @@
 #include <Preferences.h>
 #include "Audio.h"
 #include "config.h"
+#include <esp_log.h>
+
+#if SERIAL_LOG
+  #define LOGF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define LOGF(...) do {} while (0)
+#endif
 
 // patch_audio.py がライブラリ側 (Audio.cpp) に追加する変数。
 // weak 定義にしてあるので、パッチが未適用でもビルドは通る (その場合プリバッファは効かない)
@@ -41,7 +48,6 @@ volatile bool titleDirty = true;
 volatile uint32_t lastStartMs = 0;
 volatile bool reconnectReq = false;   // 接続エラー/切断時に、局の元URLから接続し直す要求
 volatile int32_t gainQ15 = 0;               // 音量ゲイン (32768 = 等倍)
-volatile uint16_t peakL = 0, peakR = 0;   // audio_process_i2s() が更新 / UI側が読んでクリア
 
 // ---------------- 画面レイアウト ----------------
 const int BTN_Y = 178, BTN_W = 58, BTN_H = 54, BTN_GAP = 5;
@@ -81,23 +87,22 @@ void drawHeader() {
   tft.setFont(F16);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
   tft.drawString("CYD Web Radio", 8, 5);
+  char cnt[16];
+  snprintf(cnt, sizeof(cnt), "%d/%d", curStation + 1, STATION_COUNT);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_DARKGREY);
+  tft.drawRightString(cnt, 250, 5);
   tft.setTextColor(playing ? TFT_GREEN : TFT_ORANGE, TFT_DARKGREY);
   tft.drawRightString(playing ? "PLAY" : "STOP", 312, 5);
 }
 
 void drawStation() {
-  tft.fillRect(0, 30, 320, 56, TFT_BLACK);
+  tft.fillRect(0, 30, 320, 30, TFT_BLACK);
   // 長い局名は小さいフォントに切り替える
   tft.setFont(F24);
   const lgfx::IFont* f = F24;
   if (tft.textWidth(STATIONS[curStation].name) > 304) { f = F16; tft.setFont(F16); }
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString(STATIONS[curStation].name, 8, (f == F24) ? 32 : 36);
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%d/%d", curStation + 1, STATION_COUNT);
-  tft.setFont(F16);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawRightString(buf, 312, 64);
 }
 
 // UTF-8文字列を maxW ピクセル幅で lines 行に折り返す (現在のフォントで幅を測定)
@@ -126,12 +131,12 @@ void wrapUtf8(const char* src, char out[][96], int lines, int maxW) {
 }
 
 void drawTitle() {
-  tft.fillRect(0, 88, 320, 38, TFT_BLACK);
+  tft.fillRect(0, 60, 320, 38, TFT_BLACK);
   tft.setFont(F16);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   char line[2][96];
   wrapUtf8(streamTitle, line, 2, 304);
-  for (int i = 0; i < 2; i++) tft.drawString(line[i], 8, 89 + i * 18);
+  for (int i = 0; i < 2; i++) tft.drawString(line[i], 8, 62 + i * 18);
 }
 
 void drawVolume() {
@@ -147,71 +152,158 @@ void drawVolume() {
 }
 
 void drawStatusMsg(const char* msg, uint16_t color = TFT_WHITE) {
-  tft.fillRect(0, 88, 320, 38, TFT_BLACK);
+  tft.fillRect(0, 60, 320, 38, TFT_BLACK);
   tft.setFont(F16);
   tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(msg, 8, 100);
+  tft.drawString(msg, 8, 72);
 }
 
-// ---------------- VUメーター ----------------
-const int VU_SEGS = 24, VU_X = 24, VU_PITCH = 12, VU_SEG_W = 10, VU_SEG_H = 7;
-const int VU_Y[2] = {129, 138};
-const uint16_t VU_OFF = 0x2104;   // 消灯セグメントの暗灰色
-struct VuCh { int level = 0; int peak = 0; uint32_t peakT = 0; uint16_t cache[VU_SEGS]; };
-VuCh vu[2];
-float vuRef = 40.0f;              // 自動ゲイン用の基準値
+// ---------------- スペクトラム表示 ----------------
+// 音声フック (audio_process_i2s) で集めたモノラル音声 (音量を掛ける前) を FFT し、
+// 80Hz〜16kHz を対数の間隔で SPEC_BARS 本のバーに分けて表示する。
+const int FFT_N = 1024;                          // 2のべき乗 (周波数の分解能 = サンプルレート / FFT_N)
+volatile int16_t  specBuf[FFT_N];                // 音声のリングバッファ (書き込み: 音声タスク)
+volatile uint32_t specHead = 0;                  // これまでに書き込んだサンプル数
 
-uint16_t vuColor(int i) { return i < 16 ? TFT_GREEN : (i < 21 ? TFT_YELLOW : TFT_RED); }
+const int   SPEC_BARS = 20, SPEC_X = 10, SPEC_PITCH = 15, SPEC_BAR_W = 12;
+const int   SPEC_Y = 100, SPEC_H = 46;           // 表示領域 y=100..145
+const float SPEC_FMIN = 80.0f, SPEC_FMAX = 16000.0f;
+const float SPEC_RANGE_DB = 45.0f;               // 表示するダイナミックレンジ
+const float SPEC_TILT_DB_OCT = 3.0f;             // 高域の持ち上げ (dB/オクターブ)。音楽は高域ほど弱いので見やすくする
 
-void vuReset() {
-  tft.fillRect(0, 127, 320, 20, TFT_BLACK);
-  tft.setFont(&fonts::Font0);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString("L", 10, VU_Y[0] - 1);
-  tft.drawString("R", 10, VU_Y[1] - 1);
-  for (int c = 0; c < 2; c++) {
-    vu[c].level = 0; vu[c].peak = 0; vu[c].peakT = 0;
-    for (int i = 0; i < VU_SEGS; i++) vu[c].cache[i] = 0;   // 0 = 未描画
+static float fftRe[FFT_N], fftIm[FFT_N], fftWin[FFT_N], fftCos[FFT_N / 2], fftSin[FFT_N / 2];
+static float fftMag[FFT_N / 2 + 1];
+static float specLevel[SPEC_BARS], specPeak[SPEC_BARS];
+static uint8_t specPeakHold[SPEC_BARS];
+static float specDbMax = -40.0f;                 // 自動ゲイン用の基準 (大きい音に合わせ、ゆっくり戻す)
+
+void specInit() {
+  for (int i = 0; i < FFT_N; i++) fftWin[i] = 0.5f - 0.5f * cosf(2.0f * PI * i / (FFT_N - 1));   // ハン窓
+  for (int i = 0; i < FFT_N / 2; i++) {
+    fftCos[i] = cosf(2.0f * PI * i / FFT_N);
+    fftSin[i] = -sinf(2.0f * PI * i / FFT_N);
   }
 }
 
-void vuUpdate() {
-  static uint32_t last = 0;
-  uint32_t now = millis();
-  if (now - last < 33) return;      // 約30fps
-  last = now;
-
-  uint16_t pl = peakL, pr = peakR;          // 直近33msのピーク振幅 (0..32768)
-  peakL = 0; peakR = 0;
-  uint8_t raw[2] = { playing ? (uint8_t)min<uint16_t>(pl >> 7, 255) : (uint8_t)0,
-                     playing ? (uint8_t)min<uint16_t>(pr >> 7, 255) : (uint8_t)0 };
-  float m = max(raw[0], raw[1]);
-  vuRef = max(max(vuRef * 0.998f, m), 24.0f);   // 大きい音に合わせ、ゆっくり戻す
-
-  for (int c = 0; c < 2; c++) {
-    VuCh& v = vu[c];
-    int target = constrain((int)(raw[c] * VU_SEGS / vuRef + 0.5f), 0, VU_SEGS);
-    if (target >= v.level) v.level = target;          // 立ち上がりは即時
-    else v.level = max(target, v.level - 1);         // 立ち下がりはゆっくり
-    if (v.level >= v.peak) { v.peak = v.level; v.peakT = now; }
-    else if (now - v.peakT > 600 && v.peak > 0) v.peak--;   // ピークホールド後に落とす
-
-    for (int i = 0; i < VU_SEGS; i++) {
-      uint16_t col = (i < v.level) ? vuColor(i) : VU_OFF;
-      if (i == v.peak - 1 && v.peak > v.level) col = TFT_WHITE;
-      if (v.cache[i] != col) {                        // 変化したセグメントだけ描画
-        v.cache[i] = col;
-        tft.fillRect(VU_X + i * VU_PITCH, VU_Y[c], VU_SEG_W, VU_SEG_H, col);
+// 基数2の FFT (その場計算)
+void fftRun() {
+  const int N = FFT_N;
+  for (int i = 0, j = 0; i < N - 1; i++) {         // ビット反転
+    if (i < j) { float t = fftRe[i]; fftRe[i] = fftRe[j]; fftRe[j] = t; t = fftIm[i]; fftIm[i] = fftIm[j]; fftIm[j] = t; }
+    int k = N >> 1;
+    while (k <= j) { j -= k; k >>= 1; }
+    j += k;
+  }
+  for (int len = 2; len <= N; len <<= 1) {
+    int half = len >> 1, step = N / len;
+    for (int i = 0; i < N; i += len) {
+      for (int k = 0; k < half; k++) {
+        float wr = fftCos[k * step], wi = fftSin[k * step];
+        int a = i + k, b = a + half;
+        float tr = fftRe[b] * wr - fftIm[b] * wi;
+        float ti = fftRe[b] * wi + fftIm[b] * wr;
+        fftRe[b] = fftRe[a] - tr; fftIm[b] = fftIm[a] - ti;
+        fftRe[a] += tr;           fftIm[a] += ti;
       }
     }
   }
 }
 
+void specReset() {
+  tft.fillRect(0, 98, 320, 50, TFT_BLACK);
+  for (int b = 0; b < SPEC_BARS; b++) { specLevel[b] = 0; specPeak[b] = 0; specPeakHold[b] = 0; }
+}
+
+// h, ph : バーとピークの高さ (ピクセル)。下から 緑 → 黄 → 赤
+void drawSpecBar(int b, int h, int ph) {
+  const int x = SPEC_X + b * SPEC_PITCH, bottom = SPEC_Y + SPEC_H;
+  if (SPEC_H - h > 0) tft.fillRect(x, SPEC_Y, SPEC_BAR_W, SPEC_H - h, TFT_BLACK);
+  const int g = SPEC_H * 60 / 100, y2 = SPEC_H * 85 / 100;
+  const int segLo[3] = {0, g, y2}, segHi[3] = {g, y2, SPEC_H};
+  const uint16_t segCol[3] = {TFT_GREEN, TFT_YELLOW, TFT_RED};
+  for (int i = 0; i < 3; i++) {
+    int hi = min(segHi[i], h);
+    if (hi > segLo[i]) tft.fillRect(x, bottom - hi, SPEC_BAR_W, hi - segLo[i], segCol[i]);
+  }
+  if (ph > h && ph > 0) tft.fillRect(x, bottom - ph, SPEC_BAR_W, 2, TFT_WHITE);   // ピーク
+}
+
+void specUpdate() {
+  static uint32_t last = 0;
+  static bool wasIdle = false;
+  uint32_t now = millis();
+  if (now - last < 40) return;                     // 約25fps
+  last = now;
+
+  float target[SPEC_BARS];
+  for (int b = 0; b < SPEC_BARS; b++) target[b] = 0;
+
+  if (playing && specHead >= (uint32_t)FFT_N) {
+    uint32_t fs = audio.getSampleRate();
+    if (fs < 8000 || fs > 96000) fs = 44100;
+    uint32_t head = specHead;
+    for (int i = 0; i < FFT_N; i++) {
+      fftRe[i] = (float)specBuf[(head - FFT_N + i) & (FFT_N - 1)] * (1.0f / 32768.0f) * fftWin[i];
+      fftIm[i] = 0.0f;
+    }
+    fftRun();
+    const float norm = 4.0f / FFT_N;               // ハン窓: 振幅1の正弦波で |X| = N/4
+    for (int k = 0; k <= FFT_N / 2; k++) fftMag[k] = sqrtf(fftRe[k] * fftRe[k] + fftIm[k] * fftIm[k]) * norm;
+
+    const float res  = (float)fs / FFT_N;
+    const float fmax = min(SPEC_FMAX, fs * 0.45f);
+    const float ratio = fmax / SPEC_FMIN;
+    float db[SPEC_BARS], frameMaxDb = -120.0f;
+    for (int b = 0; b < SPEC_BARS; b++) {
+      float flo = SPEC_FMIN * powf(ratio, (float)b / SPEC_BARS);
+      float fhi = SPEC_FMIN * powf(ratio, (float)(b + 1) / SPEC_BARS);
+      float fc  = sqrtf(flo * fhi);
+      int lo = (int)ceilf(flo / res), hi = (int)floorf(fhi / res);
+      float m = 0.0f;
+      if (hi >= lo && hi >= 1) {                   // バーの帯域に FFT の点が含まれる: その最大値
+        lo = max(lo, 1); hi = min(hi, FFT_N / 2);
+        for (int k = lo; k <= hi; k++) if (fftMag[k] > m) m = fftMag[k];
+      } else {                                     // 帯域が細くて点がない (低域): 前後の点から補間
+        float pos = fc / res;
+        int i0 = constrain((int)pos, 0, FFT_N / 2 - 1);
+        float fr = pos - (float)i0;
+        m = fftMag[i0] * (1.0f - fr) + fftMag[i0 + 1] * fr;
+      }
+      db[b] = 20.0f * log10f(m + 1e-6f) + SPEC_TILT_DB_OCT * log2f(fc / 1000.0f);
+      if (db[b] > frameMaxDb) frameMaxDb = db[b];
+    }
+    specDbMax = max(max(specDbMax - 0.3f, frameMaxDb), -50.0f);   // 自動ゲイン (約7dB/秒で戻る)
+    for (int b = 0; b < SPEC_BARS; b++)
+      target[b] = constrain((db[b] - (specDbMax - SPEC_RANGE_DB)) / SPEC_RANGE_DB, 0.0f, 1.0f);
+  }
+
+  int h[SPEC_BARS], ph[SPEC_BARS];
+  float sum = 0.0f;
+  for (int b = 0; b < SPEC_BARS; b++) {
+    float& lv = specLevel[b];
+    if (target[b] >= lv) lv = target[b];                         // 立ち上がりは即時
+    else lv = max(target[b], lv - 0.07f);                        // 立ち下がりはゆっくり
+    float& pk = specPeak[b];
+    if (lv >= pk) { pk = lv; specPeakHold[b] = 12; }             // ピークホールド
+    else if (specPeakHold[b] > 0) specPeakHold[b]--;
+    else pk = max(lv, pk - 0.025f);
+    h[b]  = (int)(lv * SPEC_H + 0.5f);
+    ph[b] = (int)(pk * SPEC_H + 0.5f);
+    sum += lv + pk;
+  }
+  if (sum == 0.0f && wasIdle) return;                            // 何も表示がなければ描画しない
+  wasIdle = (sum == 0.0f);
+
+  tft.startWrite();
+  for (int b = 0; b < SPEC_BARS; b++) drawSpecBar(b, h[b], ph[b]);
+  tft.endWrite();
+}
+
 void drawAll() {
   tft.fillScreen(TFT_BLACK);
   drawHeader(); drawStation(); drawTitle(); drawVolume();
-#if ENABLE_VU
-  vuReset();
+#if ENABLE_SPECTRUM
+  specReset();
 #endif
   for (int i = 0; i < B_COUNT; i++) drawButton(i);
 }
@@ -294,7 +386,7 @@ void audioTask(void*) {
 
 // ---------------- Audioライブラリ コールバック ----------------
 void audio_info(const char* info) {
-  Serial.printf("info: %s\n", info);
+  LOGF("info: %s\n", info);
 }
 void audio_showstreamtitle(const char* s) {
   if (strncmp(s, "HTTP/", 5) == 0) {   // サーバーのエラー応答 (例: 402) が来た
@@ -311,16 +403,14 @@ void IRAM_ATTR audio_process_i2s(uint32_t* sample, bool* continueI2S) {
   int32_t l = (int16_t)(*sample >> 16);
   int32_t r = (int16_t)(*sample & 0xFFFF);
 
-#if ENABLE_VU
-  // VUメーター用のピーク (音量を掛ける前の値なので、音量に左右されない)
-  uint16_t al = (l < 0) ? -l : l;
-  uint16_t ar = (r < 0) ? -r : r;
-  if (al > peakL) peakL = al;
-  if (ar > peakR) peakR = ar;
-#endif
 
   // モノラル化 (スピーカー出力は GPIO26 の1本だけなので、L/R を混ぜる) + 音量
   int32_t m = (l + r) >> 1;
+#if ENABLE_SPECTRUM
+  // スペクトラム用に、音量を掛ける前の音声を記録する (音量に左右されない)
+  specBuf[specHead & (FFT_N - 1)] = (int16_t)m;
+  specHead = specHead + 1;
+#endif
   m = (m * gainQ15) >> 15;
 
   // 内蔵DACは8bit。16bit → 8bit への丸め
@@ -359,7 +449,7 @@ void IRAM_ATTR audio_process_i2s(uint32_t* sample, bool* continueI2S) {
   *sample = ((uint32_t)u << 16) | u;
   *continueI2S = true;       // true にしないと音が出ない
 }
-void audio_eof_stream(const char* s)      { Serial.printf("eof: %s\n", s); lastStartMs = 0; }
+void audio_eof_stream(const char* s)      { LOGF("eof: %s\n", s); lastStartMs = 0; }
 
 // ---------------- タッチ ----------------
 int hitButton(int x, int y) {
@@ -405,13 +495,17 @@ void connectWiFi() {
     delay(250);
   }
   WiFi.setTxPower(WIFI_TX_POWER);
-  Serial.printf("WiFi OK: %s (RSSI %d dBm)\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  LOGF("WiFi OK: %s (RSSI %d dBm)\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 void setup() {
   setCpuFrequencyMhz(CPU_FREQ_MHZ);
+#if SERIAL_LOG
   Serial.begin(115200);
-  Serial.printf("CPU %d MHz\n", getCpuFrequencyMhz());
+#else
+  esp_log_level_set("*", ESP_LOG_NONE);   // I2S の信号線に UART0 (IO1/IO3) を使うので、ログ出力を止める
+#endif
+  LOGF("CPU %d MHz\n", getCpuFrequencyMhz());
 
   pinMode(21, OUTPUT);         // バックライトは PWM を使わず常時ON (PWMのノイズ混入を避ける)
   digitalWrite(21, HIGH);
@@ -436,6 +530,9 @@ void setup() {
   audio.setVolume(21);     // ライブラリ側は最大(等倍)に固定。音量は audio_process_i2s() で調整
   applyVolume();
 
+#if ENABLE_SPECTRUM
+  specInit();
+#endif
   drawAll();
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, nullptr, 3, nullptr, 0);
   startStation(curStation);
@@ -448,7 +545,7 @@ void loop() {
   if (millis() - lastDbg > 2000) {
     lastDbg = millis();
     uint32_t filled = audio.inBufferFilled(), freeB = audio.inBufferFree();
-    Serial.printf("buf %u/%u bytes  RSSI %d dBm  heap %u\n",
+    LOGF("buf %u/%u bytes  RSSI %d dBm  heap %u\n",
                   filled, filled + freeB, WiFi.RSSI(), ESP.getFreeHeap());
   }
   if (prefsDirty && millis() - prefsDirtyAt > 3000) {      // 最後の操作から3秒後に保存
@@ -457,8 +554,8 @@ void loop() {
     prefs.putInt("volume", volume);
   }
   if (titleDirty) { titleDirty = false; drawTitle(); }
-#if ENABLE_VU
-  vuUpdate();
+#if ENABLE_SPECTRUM
+  specUpdate();
 #endif
   delay(5);
 }
