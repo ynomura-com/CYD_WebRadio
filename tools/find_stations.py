@@ -5,7 +5,8 @@
 
 使い方 (Python 3.8 以上。追加のライブラリは不要):
     python3 find_stations.py                       # 日本の jazz / pop を探す
-    python3 find_stations.py --countries JP,KR,TW,HK,SG --tags jazz,pop
+    python3 find_stations.py --countries JP,KR,TW,HK,SG --tags "jazz,pop"
+    python3 find_stations.py --countries JP,KR,TW,HK,SG --tags "jazz,smooth jazz,pop,j-pop,city pop,lounge" --per-query 100 --top 30
     python3 find_stations.py --seconds 10 --top 20
 
 なぜ遅延を測るのか:
