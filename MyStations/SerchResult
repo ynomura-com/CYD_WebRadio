@@ -1,0 +1,57 @@
+局名                                 国   形式     kbps RTT(ms)   余裕(倍)  判定
+KQEV 104.7 Walnut, California      US  MP3     128      18    19.7  ◎
+Radio Dismuke                      US  MP3      24     232     8.2  ◎
+LUXURIAMUSIC                       US  MP3      32     194     7.4  ◎
+Aloha Joe's Tiki Radio             US  MP3      24     337     5.7  ◎
+FM Kahoku 78.7 (FMかほく, JOZZ5AM-F   JP  MP3      96      91     5.3  ◎
+RTHK Radio 2                       HK  MP3       ?      88     4.1  ◎
+The Jazz Groove (West)             US  AAC      64     186     3.9  ○
+Big Blue Swing                     US  MP3      64     190     3.8  ○
+LuxuriaMusic [AAC]                 US  AAC      64     203     3.5  ○
+KCSM Jazz 91.1 FM                  US  MP3      96     138     3.5  ○
+XRadio: The Worldwide Superstati   SG  MP3     128     106     3.4  ○
+WVIA 89.9 Scranton, PA             US  MP3      64     214     3.3  ○
+thejazzgroove.org WEST             US  MP3     128     112     3.2  ○
+103.5 KISS FM WKSC Chicago         US  AAC       ?     117     3.1  ○
+Y100 WHYI FM 100.7 Miami           US  AAC       ?     117     3.1  ○
+96.7 KISS FM KHFI Austin           US  AAC       ?     118     3.1  ○
+102.7 KISS FM WEGR Memphis         US  AAC       ?     118     3.1  ○
+Hot 995 WIHT 99.5 FM Washington    US  AAC       ?     118     3.0  ○
+Z100 WHTZ FM 100.3 New York        US  AAC       ?     118     3.0  ○
+102.7 KIIS FM Los Angeles          US  AAC       ?     118     3.0  ○
+XRadio: The Worldwide Superstati   SG  MP3     128     125     2.9  ○
+KUVO 89.3 Denver, CO (MP3)         US  MP3      64     260     2.8  ○
+The Jazz Groove - East             US  MP3     128     147     2.4  △ 途切れやすい
+The Jazz Groove                    US  MP3     128     149     2.4  △ 途切れやすい
+KJZZ 91.5 Phoenix, AZ              US  MP3     128     183     2.0  △ 途切れやすい
+181.FM - Fusion Jazz               US  MP3     128     188     1.9  △ 途切れやすい
+.977 Smooth Jazz                   US  MP3     128     188     1.9  △ 途切れやすい
+Hawaii Public Radio HPR-1 (KHPR)   US  MP3      64     378     1.9  △ 途切れやすい
+WWOZ 90.7 New Orleans, LA          US  MP3     128     198     1.8  △ 途切れやすい
+181.FM - Classical Jazz            US  MP3     128     200     1.8  △ 途切れやすい
+
+// ---- config.h の STATIONS に貼り付け (◎ と ○ の局) ----
+  {"KQEV 104.7 Walnut, California", "http://livecast1.soundofhope.org:2086/KQEVLPlive"},
+  {"Radio Dismuke", "http://stream2.early1900s.org:8000/"},
+  {"LUXURIAMUSIC", "http://ice10.securenetsystems.net/LUXOMP3"},
+  {"Aloha Joe's Tiki Radio", "http://s2.voscast.com:9120/stream"},
+  {"FM Kahoku 78.7 (FMかほく, JOZZ5AM-FM, 78.7 MHz, Kahoku City, Ishikawa)", "http://radio.kahoku.net:8000/;"},
+  {"RTHK Radio 2", "http://stm2.rthk.hk/radio2"},
+  {"The Jazz Groove (West)", "http://west-aac-64.streamthejazzgroove.com/stream"},
+  {"Big Blue Swing", "http://radio.bigblueswing.com:8002/"},
+  {"LuxuriaMusic [AAC]", "http://ice10.securenetsystems.net/LUXOTRON"},
+  {"KCSM Jazz 91.1 FM", "http://ice7.securenetsystems.net/KCSM2"},
+  {"XRadio: The Worldwide Superstation", "http://xradio.zone:9420/stream.mp3"},
+  {"WVIA 89.9 Scranton, PA", "http://26153.live.streamtheworld.com/WVIAFM_SC"},
+  {"thejazzgroove.org WEST", "http://west-mp3-128.streamthejazzgroove.com/;stream.mp3"},
+  {"103.5 KISS FM WKSC Chicago", "http://stream.revma.ihrhls.com/zc849"},
+  {"Y100 WHYI FM 100.7 Miami", "http://stream.revma.ihrhls.com/zc561"},
+  {"96.7 KISS FM KHFI Austin", "http://stream.revma.ihrhls.com/zc1173"},
+  {"102.7 KISS FM WEGR Memphis", "http://stream.revma.ihrhls.com/zc2133"},
+  {"Hot 995 WIHT 99.5 FM Washington", "http://stream.revma.ihrhls.com/zc2509"},
+  {"Z100 WHTZ FM 100.3 New York", "http://stream.revma.ihrhls.com/zc1469"},
+  {"102.7 KIIS FM Los Angeles", "http://stream.revma.ihrhls.com/zc185"},
+  {"XRadio: The Worldwide Superstation", "http://xradio.zone:9420/stream"},
+  {"KUVO 89.3 Denver, CO (MP3)", "http://kuvo-ice.streamguys.org/kuvo-mp3-64"},
+
+※ 余裕の目安は推定です。実機で `buf` の値が満杯のまま安定するかを確認してください
