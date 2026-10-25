@@ -102,11 +102,24 @@ src/noise_test.cpp  ノイズ診断用 (内蔵DAC向け。シリアルモニタ�
 [Radio BrowserでJapanを検索](https://www.radio-browser.info/search?page=1&order=clickcount&reverse=true&hidebroken=true&countrycode=JP})
 などで曲の名前とURLを試してみて、`include/config.h` の `const Station STATIONS[] ` の配列を書き換えます。
 
+## 局を探す (tools/find_stations.py)
+サーバーが遠い局は途切れやすいので、PC で次を実行して、日本・アジアの局を探し、通信の速さを測る。
+Python 3.8 以上があればよく、追加のライブラリは不要。
+
+```
+python3 tools/find_stations.py                                  # 日本の jazz / pop
+python3 tools/find_stations.py --countries JP,KR,TW,HK,SG --tags jazz,pop
+```
+
+radio-browser から候補を探し、MP3 / AAC (LC) の http ストリームだけを選んで、各局を数秒受信する。
+サーバーまでの往復の時間 (RTT) から、ESP32 での余裕を推定して (◎ ○ △)、
+`config.h` の `STATIONS` に貼れる形式で出力する。余裕の値は推定なので、最終的には実機の `buf` で確認する。
 
 ## わかったこと (トラブルシュート)
 | 症状 | 原因と対処 |
 |---|---|
 | 音が途切れる | ライブ配信は実時間の速さでしか届かず、元のライブラリは溜めずに再生を始めるため。`patch_audio.py` のプリバッファで解消 |
+| 特定の局だけ途切れる / 音が止まったままになる | 遠い国のサーバー (例: カナダ) の局は、通信の遅延が大きく、ESP32 の TCP 受信窓 (約5.7KB) では実時間の速さに追いつけないことがある。`info: slow stream` が出る。受信が完全に止まった場合は `AUDIO_STALL_MS` の監視で自動再接続する。根本的には、距離の近い局 (日本国内など) を選ぶ |
 | 音量に関係なく大きな「ブツブツ」 | デコードが間に合わず I2S が無音を出している。`CPU_FREQ_MHZ` を 240 に |
 | 音が出ない (I2S) | 配線 (特に BCLK と LRC の取り違え)、`AUDIO_OUT_I2S` が 1 か確認。`0` に戻すとログが見られる |
 | 書き込みに失敗する | DIN (P1 の TX) の配線を一度外して書き込む |
