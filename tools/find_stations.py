@@ -11,8 +11,8 @@
 使い方 (Python 3.8 以上):
     python3 find_stations_fixed.py
     # 日本,米国,台湾,香港, シンガポールの jazz / smooth jazz / pop / pop / j-pop / city pop / lounge を探す
-    python3 find_stations_fixed.py --countries JP,US,TW,HK,SG --tags "jazz,smooth jazz,pop,j-pop,city pop,lounge" --per-query 100 --top 30
-    python3 find_stations_fixed.py --seconds 5 --top 20
+    python3 find_stations.py --countries JP,US,TW,HK,SG --tags "jazz,smooth jazz,pop,j-pop,city pop,lounge" --per-query 100 --top 30
+    python3 find_stations.py --seconds 5 --top 20
 """
 import argparse
 import json
